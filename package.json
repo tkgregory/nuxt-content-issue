@@ -9,10 +9,11 @@
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare"
   },
-  "dependencies": {
+  "devDependencies": {
     "@nuxt/content": "^2.13.4",
     "nuxt": "^3.14.1592",
-    "vue": "latest",
-    "vue-router": "latest"
+    "serverless-s3-sync": "^3.4.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
   }
 }

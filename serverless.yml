@@ -1,0 +1,162 @@
+service: nuxtissue
+frameworkVersion: '4'
+stages:
+  default:
+    params:
+      domainName: nuxtissue.tomgregory.com
+      websiteHostedZoneId: Z06426551JRM5G4EGPV2L
+      staticResourceBucketName: ${self:service}-${sls:stage}-static-resources
+      localhostOrigin: 'http://localhost:3000'
+      cachingOptimized: 658327ea-f89d-4fab-a63d-7e88639e58f6
+      cachingDisabled: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+provider:
+  name: aws
+  runtime: nodejs22.x
+  region: us-east-1
+  deploymentMethod: direct
+  logs:
+    httpApi: true
+  httpApi:
+    metrics: true
+    cors:
+      allowedOrigins:
+        - ${param:localhostOrigin}
+        - 'https://${param:domainName}'
+      allowedHeaders:
+        - Content-Type
+        - Authorization
+      allowedMethods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+      exposedResponseHeaders:
+        - Location
+plugins:
+  - serverless-s3-sync
+custom:
+  s3Sync:
+    buckets:
+      - bucketName: ${param:staticResourceBucketName}
+        localDir: .output/public
+        bucketPrefix: static
+        deleteRemoved: true
+  deletionProtectionEnabled:
+    dev: false
+    prod: true
+  cognitoDeletionProtectionEnabled:
+    dev: INACTIVE
+    prod: ACTIVE
+package:
+  individually: true
+  patterns:
+    - package.json
+build:
+  esbuild:
+    bundle: true
+    packages: external
+functions:
+  nuxtSSREngine:
+    handler: .output/server/index.handler
+    package:
+      patterns:
+        - '!**'
+        - '.output/server/**'
+    environment:
+      NUXT_APP_CDN_URL: !Sub "https://${param:domainName}/static/"
+    events:
+      - httpApi:
+          path: /{proxy+}
+          method: get
+resources:
+  Conditions:
+    IsNonProd:
+      !Not [!Equals ['${sls:stage}', prod]]
+  Resources:
+    StaticResourceBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${param:staticResourceBucketName}
+        AccessControl: Private
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        CorsConfiguration:
+          CorsRules:
+            - AllowedMethods:
+                - GET
+              AllowedOrigins:
+                - ${param:localhostOrigin}
+                - 'https://${param:domainName}'
+    StaticResourceOriginAccessControl:
+      Type: AWS::CloudFront::OriginAccessControl
+      Properties:
+        OriginAccessControlConfig:
+          Name: ${self:service}-${sls:stage}-origin-access-control
+          OriginAccessControlOriginType: s3
+          SigningBehavior: always
+          SigningProtocol: sigv4
+    StaticResourceBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref StaticResourceBucket
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${StaticResourceBucket}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+    Certificate:
+      Type: AWS::CertificateManager::Certificate
+      Properties:
+        DomainName: ${param:domainName}
+        SubjectAlternativeNames:
+          - '*.${param:domainName}'
+        ValidationMethod: DNS
+    CloudFrontDistribution:
+      Type: AWS::CloudFront::Distribution
+      Properties:
+        DistributionConfig:
+          Enabled: true
+          HttpVersion: http2
+          Aliases:
+            - ${param:domainName}
+          ViewerCertificate:
+            AcmCertificateArn: !Ref Certificate
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          DefaultCacheBehavior:
+            TargetOriginId: "nuxt-ssr-engine"
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: ${param:cachingDisabled}
+          CacheBehaviors:
+            - PathPattern: "/static/*"
+              TargetOriginId: "nuxt-static-resources"
+              ViewerProtocolPolicy: redirect-to-https
+              CachePolicyId: ${param:cachingOptimized}
+          Origins:
+            - Id: "nuxt-static-resources"
+              DomainName: !GetAtt StaticResourceBucket.RegionalDomainName
+              OriginAccessControlId: !GetAtt StaticResourceOriginAccessControl.Id
+              S3OriginConfig: {}
+            - Id: "nuxt-ssr-engine"
+              DomainName: !Select [1, !Split ["//", !GetAtt HttpApi.ApiEndpoint]]
+              CustomOriginConfig:
+                OriginProtocolPolicy: https-only
+    WebsiteDNSRecord:
+      Type: AWS::Route53::RecordSet
+      Properties:
+        HostedZoneId: ${param:websiteHostedZoneId}
+        Name: ${param:domainName}.
+        Type: A
+        AliasTarget:
+          DNSName: !GetAtt CloudFrontDistribution.DomainName
+          HostedZoneId: Z2FDTNDATAQYW2 # value as described in AWS docs
